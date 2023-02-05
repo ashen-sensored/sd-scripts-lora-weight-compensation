@@ -8,18 +8,23 @@ import os
 import torch
 
 from library import train_util
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LRScheduler
 
 
 class LoRAModule(torch.nn.Module):
     """
     replaces forward method of the original Linear, instead of replacing the original Linear module.
     """
+    scheduler: LRScheduler
 
     def __init__(self, lora_name, org_module: torch.nn.Module, multiplier=1.0, lora_dim=4, alpha=1):
         """ if alpha == 0 or None, alpha is rank (no scaling). """
         super().__init__()
+        self.scheduler = None
         self.lora_name = lora_name
         self.lora_dim = lora_dim
+        self.optimizer = None
 
         if org_module.__class__.__name__ == 'Conv2d':
             in_dim = org_module.in_channels
@@ -50,8 +55,30 @@ class LoRAModule(torch.nn.Module):
         self.org_module.forward = self.forward
         del self.org_module
 
+    def assign_optimizer(self, optimizer):
+        self.optimizer = optimizer
+
+    def assign_scheduler(self, scheduler):
+        self.scheduler = scheduler
+
     def forward(self, x):
-        return self.org_forward(x) + self.lora_up(self.lora_down(x)) * self.multiplier * self.scale
+        lora_delta = self.lora_up(self.lora_down(x)) * self.multiplier * self.scale
+        # print('forward debug')
+        optimizer_param_group_index = -1
+        if self.lora_name.startswith(LoRANetwork.LORA_PREFIX_UNET):
+            optimizer_param_group_index = 0
+        elif self.lora_name.startswith(LoRANetwork.LORA_PREFIX_TEXT_ENCODER):
+            optimizer_param_group_index = 1
+        if self.scheduler is not None and self.optimizer is not None and 0 <= optimizer_param_group_index < len(self.optimizer.param_groups):
+            current_param_group = self.optimizer.param_groups[optimizer_param_group_index]
+            # Learning Rate Scaling Factor = sqrt(1 - beta2^t) / (1 - beta1^t), t is step count
+            lr_scale = math.sqrt(1 - current_param_group['betas'][1] ** self.scheduler._step_count) / (1 - current_param_group['betas'][0] ** self.scheduler._step_count)
+            # cur_lr = self.scheduler.get_last_lr()[optimizer_param_group_index]
+            lr_scale_final = 1 / lr_scale
+            lora_delta = lora_delta * lr_scale_final
+
+            # print(cur_lr, lr_scale, cur_lr / lr_scale, self.scheduler._step_count, current_param_group['betas'][0], current_param_group['betas'][1])
+        return self.org_forward(x) + lora_delta
 
 
 def create_network(multiplier, network_dim, network_alpha, vae, text_encoder, unet, **kwargs):
@@ -93,9 +120,12 @@ class LoRANetwork(torch.nn.Module):
 
     def __init__(self, text_encoder, unet, multiplier=1.0, lora_dim=4, alpha=1) -> None:
         super().__init__()
+
         self.multiplier = multiplier
         self.lora_dim = lora_dim
         self.alpha = alpha
+        self.optimizer = None
+        self.scheduler = None
 
         # create module instances
         def create_modules(prefix, root_module: torch.nn.Module, target_replace_modules) -> list[LoRAModule]:
@@ -200,6 +230,27 @@ class LoRANetwork(torch.nn.Module):
             all_params.append(param_data)
 
         return all_params
+
+    def assign_optimizer(self, optimizer):
+        self.optimizer = optimizer
+        if self.text_encoder_loras:
+            for lora in self.text_encoder_loras:
+                lora.assign_optimizer(optimizer)
+        if self.unet_loras:
+            for lora in self.unet_loras:
+                lora.assign_optimizer(optimizer)
+        pass
+
+
+    def assign_scheduler(self, scheduler):
+        self.scheduler = scheduler
+        if self.text_encoder_loras:
+            for lora in self.text_encoder_loras:
+                lora.assign_scheduler(scheduler)
+        if self.unet_loras:
+            for lora in self.unet_loras:
+                lora.assign_scheduler(scheduler)
+        pass
 
     def prepare_grad_etc(self, text_encoder, unet):
         self.requires_grad_(True)

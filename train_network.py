@@ -1,3 +1,5 @@
+from types import ModuleType
+
 from diffusers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION
 from torch.optim import Optimizer
 from typing import Optional, Union
@@ -17,6 +19,7 @@ import diffusers
 from diffusers import DDPMScheduler
 
 import library.train_util as train_util
+import networks.lora
 from library.train_util import DreamBoothDataset, FineTuningDataset
 
 
@@ -210,6 +213,8 @@ def train(args):
   # betaやweight decayはdiffusers DreamBoothもDreamBooth SDもデフォルト値のようなのでオプションはとりあえず省略
   optimizer = optimizer_class(trainable_params, lr=args.learning_rate)
 
+  network.assign_optimizer(optimizer)
+
   # dataloaderを準備する
   # DataLoaderのプロセス数：0はメインプロセスになる
   n_workers = min(args.max_data_loader_n_workers, os.cpu_count() - 1)      # cpu_count-1 ただし最大で指定された数まで
@@ -228,6 +233,7 @@ def train(args):
       num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
       num_cycles=args.lr_scheduler_num_cycles, power=args.lr_scheduler_power)
 
+  network.assign_scheduler(lr_scheduler)
   # 実験的機能：勾配も含めたfp16学習を行う　モデル全体をfp16にする
   if args.full_fp16:
     assert args.mixed_precision == "fp16", "full_fp16 requires mixed precision='fp16' / full_fp16を使う場合はmixed_precision='fp16'を指定してください。"

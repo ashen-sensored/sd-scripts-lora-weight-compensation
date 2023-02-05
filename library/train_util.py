@@ -1107,11 +1107,11 @@ def replace_unet_cross_attn_to_xformers():
   except ImportError:
     raise ImportError("No xformers / xformersがインストールされていないようです")
 
-  def forward_xformers(self, x, context=None, mask=None):
+  def forward_xformers(self, x, encoder_hidden_states=None, attention_mask=None):
     h = self.heads
     q_in = self.to_q(x)
 
-    context = default(context, x)
+    context = default(encoder_hidden_states, x)
     context = context.to(x.dtype)
 
     if hasattr(self, 'hypernetwork') and self.hypernetwork is not None:
